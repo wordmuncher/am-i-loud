@@ -1,5 +1,21 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'dart:math';
+import 'package:intl/intl.dart';
+
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:mic_stream/mic_stream.dart';
+import 'package:vibration/vibration.dart';
+import 'circle_painter.dart';
+
+enum Command {
+  start,
+  stop,
+  change,
+}
+
+var volume = new NumberFormat("###,###", "en-US");
 
 void main() => runApp(MyApp());
 
@@ -8,151 +24,350 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Am I Too Loud',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
-        primarySwatch: Colors.blueGrey,
-      ),
-      home: MyHomePage(title: 'Am I Loud?'),
+          primarySwatch: Colors.blueGrey,
+          scaffoldBackgroundColor: Colors.blueGrey[100]),
+      home: AmITooLoudApp(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
-  final String title;
-
+class AmITooLoudApp extends StatefulWidget {
   @override
-  _MyHomePageState createState() => _MyHomePageState();
+  _AmITooLoudAppState createState() => _AmITooLoudAppState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-  int _maxCounter = 0;
+class _AmITooLoudAppState extends State<AmITooLoudApp>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  Stream<List<int>> stream;
+  StreamSubscription<List<int>> listener;
+  List<int> currentSamples;
+  final AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT;
 
-  void _clearCounter() {
+  // Refreshes the Widget for every possible tick to force a rebuild of the sound wave
+  AnimationController controller;
+
+  Color _iconColor = Colors.white;
+  bool isRecording = false;
+  bool memRecordingState = false;
+  bool isActive;
+  DateTime startTime;
+
+  double currentVolume = 0;
+  double maxVolume = 0;
+  int countMeasurements = 0;
+  int loudMeasurements = 0;
+  double averageVolume = 0;
+
+  double volumeThreshold;
+  double loudThreshold;
+
+  int page = 0;
+  List state = ["TooLoud", "Dashboard"];
+
+  @override
+  void initState() {
+    print("Init application");
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    getThresholds();
     setState(() {
-      _counter = 0;
-      _maxCounter = 0;
+      initPlatformState();
     });
   }
 
-  void _incrementCounter() {
-    setState(() {
-      _counter++;
-      _maxCounter = max(_counter, _maxCounter);
-    });
-  }
+  void _controlPage(int index) => setState(() => page = index);
 
-  void _decrementCounter() {
-    setState(() {
-      _counter--;
-    });
-  }
-
-  Color getColor(number, weight) {
-    if (number < 0.5) {
-      return Colors.blueGrey[200];
+  // Responsible for switching between recording / idle state
+  void _controlMicStream({Command command: Command.change}) async {
+    switch (command) {
+      case Command.change:
+        _changeListening();
+        break;
+      case Command.start:
+        _startListening();
+        break;
+      case Command.stop:
+        _stopListening();
+        break;
     }
-    if (number < 0.75) {
-      return Colors.yellow[weight];
-    }
-    return Colors.red[weight];
+  }
+
+  bool _changeListening() =>
+      !isRecording ? _startListening() : _stopListening();
+
+  bool _startListening() {
+    if (isRecording) return false;
+    stream = microphone(
+        audioSource: AudioSource.DEFAULT,
+        sampleRate: 16000,
+        channelConfig: ChannelConfig.CHANNEL_IN_MONO,
+        audioFormat: AUDIO_FORMAT);
+
+    setState(() {
+      isRecording = true;
+      startTime = DateTime.now();
+      currentVolume = 0;
+      maxVolume = 0;
+      countMeasurements = 0;
+      averageVolume = 0;
+      loudMeasurements = 0;
+    });
+
+    print("Start Listening to the microphone");
+    listener = stream.listen((samples) => updateVolume(samples));
+    return true;
+  }
+
+  void updateVolume(List<int> samples) {
+    setState(() {
+      currentSamples = samples;
+      currentVolume = log(
+          samples.map((i) => pow(i, 2)).reduce((j, k) => j + k) /
+              samples.length);
+      print("volume limit: $volumeThreshold, volume: $currentVolume");
+      maxVolume = max(maxVolume, currentVolume);
+      if (currentVolume > volumeThreshold) {
+        countMeasurements = countMeasurements + 1;
+        averageVolume =
+            (averageVolume * (countMeasurements - 1) + currentVolume) /
+                countMeasurements;
+      }
+      if (currentVolume > loudThreshold) {
+        loudMeasurements = loudMeasurements + 1;
+        Vibration.vibrate(duration: 500);
+      }
+    });
+  }
+
+  bool _stopListening() {
+    if (!isRecording) return false;
+    print("Stop Listening to the microphone");
+    listener.cancel();
+
+    setState(() {
+      isRecording = false;
+      currentSamples = null;
+      startTime = null;
+    });
+    return true;
+  }
+
+  // Platform messages are asynchronous, so we initialize in an async method.
+  Future<void> initPlatformState() async {
+    if (!mounted) return;
+    isActive = true;
+
+    controller =
+        AnimationController(duration: Duration(seconds: 1), vsync: this)
+          ..addListener(() {
+            if (isRecording) {
+              setState(() {});
+            }
+          })
+          ..addStatusListener((status) {
+            if (status == AnimationStatus.completed)
+              controller.reverse();
+            else if (status == AnimationStatus.dismissed) controller.forward();
+          })
+          ..forward();
+  }
+
+  Color _getVolColor() => (currentVolume > loudThreshold)
+      ? Colors.red[300]
+      : Colors.greenAccent[200];
+  Color _getBgColor() => (isRecording) ? Colors.red : Colors.cyan;
+  Icon _getIcon() =>
+      (isRecording) ? Icon(Icons.stop) : Icon(Icons.keyboard_voice);
+
+  void setThresholds(double volumeThreshold, double loudThreshold) async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('volumeThreshold', volumeThreshold);
+    await prefs.setDouble('loudThreshold', loudThreshold);
+  }
+
+  void getThresholds() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    double volume = (prefs.getDouble('volumeThreshold') ?? 11);
+    double loud = (prefs.getDouble('loudThreshold') ?? 16);
+    setState(() {
+      volumeThreshold = volume;
+      loudThreshold = loud;
+    });
+    print('Volume: $volumeThreshold , Loud: $loudThreshold.');
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              Container(
-                padding: const EdgeInsets.all(8.0),
-                alignment: Alignment.center,
-                constraints: BoxConstraints.expand(
-                  height: Theme.of(context).textTheme.display1.fontSize * 1.1 +
-                      250.0,
-                ),
-                decoration: BoxDecoration(
-                    color: getColor(_counter / 20, 100),
-                    shape: BoxShape.circle,
-                    border: new Border.all(
-                      color: getColor(_maxCounter / 20, 200),
-                      width: 4.0,
-                    )),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      'The counter is at:',
+    return MaterialApp(
+      theme: ThemeData.dark(),
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('Am I Too Loud?'),
+        ),
+        floatingActionButton: (page == 0)
+            ? null
+            : FloatingActionButton(
+                onPressed: _controlMicStream,
+                child: _getIcon(),
+                foregroundColor: _iconColor,
+                backgroundColor: _getBgColor(),
+                tooltip: (isRecording) ? "Stop recording" : "Start recording",
+              ),
+        bottomNavigationBar: BottomNavigationBar(
+          items: [
+            BottomNavigationBarItem(
+              icon: Icon(Icons.face),
+              title: Text("Am I Too Loud"),
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.view_list),
+              title: Text("Dashboard"),
+            ),
+          ],
+          backgroundColor: Colors.black26,
+          elevation: 20,
+          currentIndex: page,
+          onTap: _controlPage,
+        ),
+        body: Center(
+          child: (page == 0)
+              ? Stack(
+                  alignment: Alignment.center,
+                  children: <Widget>[
+                    Container(
+                      child: CustomPaint(
+                        painter: CirclePainter(
+                          currentSamples,
+                          _getVolColor(),
+                          context,
+                        ),
+                      ),
                     ),
-                    Text(
-                      '$_counter',
-                      style: Theme.of(context).textTheme.display1,
-                    ),
-                    Text(
-                      'The max value of the counter so far is:',
-                    ),
-                    Text(
-                      '$_maxCounter',
-                      style: Theme.of(context).textTheme.display1,
+                    MaterialButton(
+                      onPressed: _controlMicStream,
+                      color: _getBgColor(),
+                      textColor: _iconColor,
+                      child: Icon(
+                        (isRecording) ? Icons.stop : Icons.volume_up,
+                        size: 96,
+                      ),
+                      padding: EdgeInsets.all(16),
+                      shape: CircleBorder(),
                     ),
                   ],
-                ),
-              ),
-            ]),
-      ),
-      floatingActionButton: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton(
-            onPressed: _clearCounter,
-            tooltip: 'Clear',
-            child: Icon(Icons.clear),
-            heroTag: null,
-          ), // This trailing comma makes auto-formatting nicer for build methods.
-          SizedBox(
-            width: 10,
-          ),
-          FloatingActionButton(
-            onPressed: _incrementCounter,
-            tooltip: 'Increment',
-            child: Icon(Icons.add),
-            heroTag: null,
-          ), // This trailing comma makes auto-formatting nicer for build methods.
-          SizedBox(
-            width: 10,
-          ),
-          FloatingActionButton(
-            onPressed: _decrementCounter,
-            tooltip: 'Decrement',
-            child: Icon(Icons.remove),
-            heroTag: null,
-          ), // This trailing comma makes auto-formatting nicer for build methods.
-        ],
+                )
+              : Column(children: <Widget>[
+                  ListTile(
+                      leading: Icon(Icons.title),
+                      title: Text("Am I too loud right now?")),
+                  ListTile(
+                    leading: Icon(Icons.mic),
+                    title: Text((isRecording ? "Recording" : "Not recording")),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.ring_volume),
+                    title: Text((isRecording
+                        ? "Current Volume: ${volume.format(currentVolume)}"
+                        : "Not recording")),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.volume_down),
+                    title:
+                        Text("Average Volume: ${volume.format(averageVolume)}"),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.volume_up),
+                    title: Text("Max Volume: ${volume.format(maxVolume)}"),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.format_list_numbered),
+                    title: Text("# of Measurements: $countMeasurements"),
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.face),
+                    title: Text("Loud Seconds: $loudMeasurements"),
+                  ),
+                  ListTile(
+                      leading: Icon(Icons.access_time),
+                      title: Text((isRecording
+                          ? "Recording time: ${DateTime.now().difference(startTime).toString()}"
+                          : "Not recording"))),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: Colors.red[700],
+                      inactiveTrackColor: Colors.red[100],
+                      trackShape: RoundedRectSliderTrackShape(),
+                      trackHeight: 4.0,
+                      thumbShape:
+                          RoundSliderThumbShape(enabledThumbRadius: 12.0),
+                      thumbColor: Colors.redAccent,
+                      overlayColor: Colors.red.withAlpha(32),
+                      overlayShape:
+                          RoundSliderOverlayShape(overlayRadius: 28.0),
+                      tickMarkShape: RoundSliderTickMarkShape(),
+                      activeTickMarkColor: Colors.red[700],
+                      inactiveTickMarkColor: Colors.red[100],
+                      valueIndicatorShape: PaddleSliderValueIndicatorShape(),
+                      valueIndicatorColor: Colors.redAccent,
+                      valueIndicatorTextStyle: TextStyle(
+                        color: Colors.white,
+                      ),
+                    ),
+                    child: RangeSlider(
+                      values: RangeValues(volumeThreshold, loudThreshold),
+                      min: 0,
+                      max: 25,
+                      divisions: 25,
+                      labels: RangeLabels('${volume.format(volumeThreshold)}',
+                          '${volume.format(loudThreshold)}'),
+                      onChanged: (values) {
+                        setThresholds(values.start, values.end);
+                        getThresholds();
+                      },
+                    ),
+                  ),
+                ]),
+        ),
       ),
     );
   }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      isActive = true;
+      print("Resume app");
+
+      _controlMicStream(
+          command: memRecordingState ? Command.start : Command.stop);
+    } else if (isActive) {
+      memRecordingState = isRecording;
+      _controlMicStream(command: Command.stop);
+
+      print("Pause app");
+      isActive = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    listener.cancel();
+    controller.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 }
+
+//ToDO: fine-tune values
+//https://stackoverflow.com/questions/49097889/how-to-calculate-the-decibel-of-audio-signal-and-record-the-audio-in-java
+
+//TODO: package for release on store
+//TODO: add icon
+
+//TODO: re-design to make prettier
+//TODO: prettier sound circle
+//TODO: put some data into the button
+//TODO: behavior for buttons
+//Todo: Slider colors and labels to make more sense

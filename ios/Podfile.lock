@@ -1,0 +1,34 @@
+PODS:
+  - Flutter (1.0.0)
+  - mic_stream (0.0.1):
+    - Flutter
+  - permission (0.0.1):
+    - Flutter
+  - vibration (1.2.4):
+    - Flutter
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - mic_stream (from `.symlinks/plugins/mic_stream/ios`)
+  - permission (from `.symlinks/plugins/permission/ios`)
+  - vibration (from `.symlinks/plugins/vibration/ios`)
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  mic_stream:
+    :path: ".symlinks/plugins/mic_stream/ios"
+  permission:
+    :path: ".symlinks/plugins/permission/ios"
+  vibration:
+    :path: ".symlinks/plugins/vibration/ios"
+
+SPEC CHECKSUMS:
+  Flutter: 0e3d915762c693b495b44d77113d4970485de6ec
+  mic_stream: 9e7c9fe19d0d8bd0d273bd5428bbd13cab6f4429
+  permission: c186483e23779d53def6b55986323494927c22c8
+  vibration: f0c5bb486671fb81e973bfb451d89f8efd07c9c9
+
+PODFILE CHECKSUM: 1b66dae606f75376c5f2135a8290850eeb09ae83
+
+COCOAPODS: 1.9.1
